@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Stock Conviction Analyzer & Portfolio Hub</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar" aria-label="Controls">
+        <div class="brand-block">
+          <div class="brand-mark" aria-hidden="true">SA</div>
+          <div>
+            <h1>Stock Analyzer</h1>
+            <p>Macro, fundamentals, and company prospects in one scorecard.</p>
+          </div>
+        </div>
+
+        <section class="panel">
+          <div class="panel-heading">
+            <h2>Stock List</h2>
+            <button id="loadSampleBtn" class="icon-button" title="Load sample portfolio" aria-label="Load sample portfolio">
+              <span aria-hidden="true">↺</span>
+            </button>
+          </div>
+          <label for="tickerInput">Tickers</label>
+          <textarea
+            id="tickerInput"
+            rows="10"
+            spellcheck="false"
+            placeholder="AAPL, MSFT, NVDA&#10;or&#10;AAPL,28,7,5,31,1.6,3.4,8"
+          ></textarea>
+          <p class="hint">Enter comma-separated symbols on one line. The app fetches price, valuation, growth, margins, debt, free cash flow, and prospects online.</p>
+          <button id="analyzeBtn" class="primary-button">Analyze List</button>
+        </section>
+
+        <section class="panel">
+          <h2>Macro Backdrop</h2>
+          <div class="control-grid">
+            <label>
+              Rates
+              <select id="ratesInput">
+                <option value="35">Falling</option>
+                <option value="25" selected>Stable</option>
+                <option value="10">Rising</option>
+              </select>
+            </label>
+            <label>
+              Inflation
+              <select id="inflationInput">
+                <option value="30">Cooling</option>
+                <option value="20" selected>Contained</option>
+                <option value="8">Hot</option>
+              </select>
+            </label>
+            <label>
+              GDP Trend
+              <select id="growthInput">
+                <option value="25" selected>Expanding</option>
+                <option value="16">Flat</option>
+                <option value="6">Contracting</option>
+              </select>
+            </label>
+            <label>
+              Market Risk
+              <select id="riskInput">
+                <option value="20">Low</option>
+                <option value="13" selected>Balanced</option>
+                <option value="5">Elevated</option>
+              </select>
+            </label>
+          </div>
+        </section>
+
+        <section class="panel compact">
+          <h2>Weights</h2>
+          <label for="macroWeight">Macro <span id="macroWeightValue">25%</span></label>
+          <input id="macroWeight" type="range" min="10" max="45" value="25" />
+          <label for="fundamentalWeight">Fundamentals <span id="fundamentalWeightValue">45%</span></label>
+          <input id="fundamentalWeight" type="range" min="25" max="65" value="45" />
+          <label for="prospectWeight">Prospects <span id="prospectWeightValue">30%</span></label>
+          <input id="prospectWeight" type="range" min="15" max="50" value="30" />
+        </section>
+      </aside>
+
+      <section class="workspace">
+        <!-- Top Navigation Header -->
+        <header class="top-nav-bar">
+          <div class="nav-brand">
+            <span class="eyebrow">Finance Portal</span>
+            <h2>Stock conviction manager</h2>
+          </div>
+          <div class="nav-meta">
+            <nav class="nav-tabs" role="tablist">
+              <button id="tabAnalyzer" class="nav-tab active" role="tab" aria-selected="true" aria-controls="analyzerPage">
+                <span class="tab-icon">📊</span> Conviction Scorecard
+              </button>
+              <button id="tabPortfolio" class="nav-tab" role="tab" aria-selected="false" aria-controls="portfolioPage">
+                <span class="tab-icon">💼</span> Portfolio Hub <span id="holdingCount" class="tab-badge">0</span>
+              </button>
+            </nav>
+            <p id="loadStatus" class="load-status" aria-live="polite">Loading saved data...</p>
+          </div>
+        </header>
+
+        <!-- Horizontal Quick-Add Position Panel -->
+        <section class="quick-add-panel">
+          <div class="quick-add-header">
+            <span class="eyebrow">Quick Add Purchased Position</span>
+          </div>
+          <form id="quickAddForm" class="quick-add-bar">
+            <div class="qa-field">
+              <label for="holdingTickerInput">Ticker</label>
+              <input id="holdingTickerInput" type="text" maxlength="8" placeholder="MSFT" required />
+            </div>
+            <div class="qa-field">
+              <label for="sharesInput">Qty</label>
+              <input id="sharesInput" type="number" min="0" step="0.0001" placeholder="10" required />
+            </div>
+            <div class="qa-field">
+              <label for="entryPriceInput">Buy Price</label>
+              <input id="entryPriceInput" type="number" min="0" step="0.01" placeholder="420" required />
+            </div>
+            <div class="qa-field">
+              <label for="stopLossInput">Stop Loss</label>
+              <input id="stopLossInput" type="number" min="0" step="0.01" placeholder="Optional" />
+            </div>
+            <div class="qa-field">
+              <label for="targetPriceInput">Target</label>
+              <input id="targetPriceInput" type="number" min="0" step="0.01" placeholder="Optional" />
+            </div>
+            <div class="qa-field">
+              <label for="basketInput">Basket</label>
+              <div class="basket-select-row">
+                <input id="basketInput" type="text" list="basketDatalist" placeholder="Select..." />
+                <datalist id="basketDatalist"></datalist>
+                <button type="button" id="qaNewBasketBtn" class="quick-basket-add-btn" title="Create custom basket">＋</button>
+              </div>
+            </div>
+            <div class="qa-field">
+              <label for="sourceIdeaInput">Source</label>
+              <input id="sourceIdeaInput" type="text" placeholder="Screen, Friend..." />
+            </div>
+            <button type="submit" id="addHoldingBtn" class="primary-button quick-add-btn">Add Stock</button>
+          </form>
+        </section>
+
+        <!-- Page 1: Decision Dashboard (Original Content) -->
+        <div id="analyzerPage" class="workspace-page active">
+          <header class="topbar">
+            <div>
+              <p class="eyebrow">Decision Dashboard</p>
+              <h2>Buy candidates ranked by conviction</h2>
+            </div>
+            <div class="toolbar">
+              <button id="monitorBtn" class="secondary-button" title="Refresh owned stock monitor">Refresh Holdings</button>
+              <button id="exportBtn" class="secondary-button" title="Export results as CSV">Export CSV</button>
+              <button id="clearBtn" class="secondary-button danger" title="Clear saved data">Clear All</button>
+            </div>
+          </header>
+
+          <section class="summary-strip" aria-label="Portfolio summary">
+            <div>
+              <span id="buyCount">0</span>
+              <p>Buys</p>
+            </div>
+            <div>
+              <span id="watchCount">0</span>
+              <p>Watchlist</p>
+            </div>
+            <div>
+              <span id="avoidCount">0</span>
+              <p>Avoid</p>
+            </div>
+            <div>
+              <span id="averageScore">0</span>
+              <p>Avg Score</p>
+            </div>
+          </section>
+
+          <section class="recommendation-panel" aria-label="Replacement recommendations">
+            <div>
+              <p class="eyebrow">Portfolio Fit</p>
+              <h3 id="replacementHeadline">Add purchased stocks to compare replacements</h3>
+            </div>
+            <div id="replacementList" class="replacement-list"></div>
+          </section>
+
+          <section class="monitor-panel" aria-label="Owned stock monitor">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Owned Stock Monitor</p>
+                <h3 id="monitorHeadline">Add holdings to monitor targets, stops, and major changes</h3>
+              </div>
+              <span id="lastMonitorTime" class="monitor-time">Not checked yet</span>
+            </div>
+            <div id="monitorAlerts" class="monitor-alerts"></div>
+          </section>
+
+          <section class="results-layout">
+            <div class="table-panel">
+              <div class="panel-heading">
+                <h3>Analysis Table</h3>
+                <div class="segmented" role="group" aria-label="Filter results">
+                  <button class="segment active" data-filter="all">All</button>
+                  <button class="segment" data-filter="Buy">Buy</button>
+                  <button class="segment" data-filter="Watch">Watch</button>
+                  <button class="segment" data-filter="Avoid">Avoid</button>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Ticker</th>
+                      <th>Decision</th>
+                      <th>Score</th>
+                      <th>Macro</th>
+                      <th>Fundamentals</th>
+                      <th>Prospects</th>
+                      <th>Target</th>
+                      <th>Portfolio Action</th>
+                      <th>Key Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody id="resultsBody"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="detail-panel">
+              <h3>Selected Stock</h3>
+              <div id="detailContent" class="detail-empty">Run an analysis, then select a row for the full score breakdown.</div>
+            </div>
+          </section>
+        </div>
+
+        <!-- Page 2: Portfolio Hub (New Content) -->
+        <div id="portfolioPage" class="workspace-page">
+          <header class="portfolio-header">
+            <div>
+              <p class="eyebrow">Portfolio Performance</p>
+              <h2>Manage and track stock baskets</h2>
+            </div>
+            <div class="toolbar">
+              <button id="newBasketBtn" class="primary-button inline-btn">＋ Create Basket</button>
+              <button id="refreshPortfolioBtn" class="secondary-button">Refresh Prices</button>
+            </div>
+          </header>
+
+          <section class="summary-strip portfolio-summary" aria-label="Portfolio aggregated stats">
+            <div class="summary-card">
+              <span id="totalPortfolioValue">$0.00</span>
+              <p>Market Value</p>
+            </div>
+            <div class="summary-card">
+              <span id="totalPortfolioCost">$0.00</span>
+              <p>Total Cost Basis</p>
+            </div>
+            <div class="summary-card">
+              <span id="totalPortfolioPnl" class="pnl-neutral">$0.00 (0.00%)</span>
+              <p>Total Net P&amp;L</p>
+            </div>
+            <div class="summary-card">
+              <span id="totalPortfolioScore">0</span>
+              <p>Avg Conviction Score</p>
+            </div>
+          </section>
+
+          <section class="panel portfolio-holdings-panel">
+            <div class="panel-heading">
+              <h3>Purchased Holdings</h3>
+            </div>
+            <div id="holdingsList" class="holdings-list"></div>
+          </section>
+
+          <div class="portfolio-controls-bar">
+            <h3>Custom Baskets</h3>
+            <div class="portfolio-sort">
+              <label for="basketSortSelect">Sort Baskets:</label>
+              <select id="basketSortSelect">
+                <option value="value-desc">Highest Value</option>
+                <option value="pnl-desc">Best Return %</option>
+                <option value="name-asc">Name (A-Z)</option>
+                <option value="score-desc">Weighted Conviction</option>
+              </select>
+            </div>
+          </div>
+
+          <div id="basketGrid" class="basket-grid">
+            <!-- Dynamic basket cards with embedded collapsible stock lists rendered here -->
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Create/Edit Basket Modal -->
+    <div id="basketModal" class="modal-overlay" style="display: none;">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 id="modalTitle">Create Stock Basket</h3>
+          <button id="closeModalBtn" class="close-btn" aria-label="Close dialog">&times;</button>
+        </div>
+        <form id="basketForm">
+          <input type="hidden" id="editBasketId" />
+          <div class="form-group">
+            <label for="modalBasketName">Basket Name</label>
+            <input type="text" id="modalBasketName" required placeholder="e.g. AI Enablers, Cash Cow Dividends" />
+          </div>
+          <div class="form-group">
+            <label for="modalBasketDesc">Description</label>
+            <input type="text" id="modalBasketDesc" placeholder="e.g. Tech growth, swing strategies, high dividend yields" />
+          </div>
+          <div class="form-group">
+            <label>Card Color Accent</label>
+            <div class="color-presets">
+              <label class="color-preset active" style="--preset-color: #1f7a5c;"><input type="radio" name="basketColor" value="emerald" checked /> Emerald</label>
+              <label class="color-preset" style="--preset-color: #2d638f;"><input type="radio" name="basketColor" value="sapphire" /> Sapphire</label>
+              <label class="color-preset" style="--preset-color: #7b4ec3;"><input type="radio" name="basketColor" value="amethyst" /> Amethyst</label>
+              <label class="color-preset" style="--preset-color: #b87614;"><input type="radio" name="basketColor" value="amber" /> Amber</label>
+              <label class="color-preset" style="--preset-color: #b23b42;"><input type="radio" name="basketColor" value="ruby" /> Ruby</label>
+              <label class="color-preset" style="--preset-color: #65716b;"><input type="radio" name="basketColor" value="slate" /> Slate</label>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" id="cancelModalBtn" class="secondary-button">Cancel</button>
+            <button type="submit" id="saveBasketBtn" class="primary-button">Save Basket</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <script src="app.js?v=9"></script>
+  </body>
+</html>
