@@ -385,6 +385,7 @@ function hydrateTargetModel(result) {
 
   return {
     ...result,
+    price: currentPrice,
     currentPrice,
     targetBucket: bucket === "growth" ? "Growth" : bucket === "early-stage" ? "Early-stage" : "Mature",
     targetMethod,
@@ -1124,11 +1125,13 @@ function saveState() {
 
 function saveAnalysis() {
   if (!state.results.length) return;
-  
+
+  const normalizedResults = state.results.map((result) => hydrateTargetModel(result));
+
   fetch("/api/analysis", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ results: state.results })
+    body: JSON.stringify({ results: normalizedResults })
   }).catch(err => console.warn("Failed to save analysis:", err));
 }
 
@@ -1196,7 +1199,9 @@ function loadAnalysis() {
   fetch("/api/analysis")
     .then(res => res.json())
     .then(data => {
-      state.results = Array.isArray(data.analysis) ? data.analysis.map(hydrateTargetModel) : [];
+      const savedAnalysis = Array.isArray(data.analysis) ? data.analysis : [];
+      const needsBackfill = savedAnalysis.some((result) => result.price == null);
+      state.results = savedAnalysis.map(hydrateTargetModel);
       state.selectedTicker = state.results[0]?.ticker ?? null;
       buildRecommendations();
       if (!state.results.length) {
@@ -1204,6 +1209,9 @@ function loadAnalysis() {
         elements.tickerInput.value = sampleRows.join("\n");
         runAnalysis();
         return;
+      }
+      if (needsBackfill) {
+        saveAnalysis();
       }
       render();
       setLoadStatus("Saved analysis loaded.", "success");

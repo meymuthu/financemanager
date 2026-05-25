@@ -129,6 +129,7 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ticker TEXT UNIQUE NOT NULL,
                 pe REAL,
+                price REAL,
                 eps_growth REAL,
                 revenue_growth REAL,
                 margin REAL,
@@ -146,6 +147,10 @@ def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        columns = [row[1] for row in cursor.execute("PRAGMA table_info(analysis_results)")]
+        if "price" not in columns:
+            cursor.execute("ALTER TABLE analysis_results ADD COLUMN price REAL")
         
         # Purchased stocks table
         cursor.execute("""
@@ -406,6 +411,7 @@ class StockHandler(SimpleHTTPRequestHandler):
             results.append({
                 "ticker": row['ticker'],
                 "pe": row['pe'],
+                "price": row['price'],
                 "epsGrowth": row['eps_growth'],
                 "revenueGrowth": row['revenue_growth'],
                 "margin": row['margin'],
@@ -437,12 +443,13 @@ class StockHandler(SimpleHTTPRequestHandler):
                 for result in data.get("results", []):
                     cursor.execute("""
                         INSERT OR REPLACE INTO analysis_results (
-                            ticker, pe, eps_growth, revenue_growth, margin, debt_equity, fcf_yield,
+                            ticker, pe, price, eps_growth, revenue_growth, margin, debt_equity, fcf_yield,
                             sector, name, macro, fundamentals, prospects, score, decision, reasons, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """, (
                         result.get("ticker"),
                         result.get("pe"),
+                        result.get("price"),
                         result.get("epsGrowth"),
                         result.get("revenueGrowth"),
                         result.get("margin"),
