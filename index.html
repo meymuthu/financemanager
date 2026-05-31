@@ -100,6 +100,16 @@
                 <span class="tab-icon">💼</span> Portfolio Hub <span id="holdingCount" class="tab-badge">0</span>
               </button>
             </nav>
+            <div class="account-controls">
+              <label for="accountSelect">Account</label>
+              <div class="account-actions">
+                  <select id="accountSelect" aria-label="Select account"></select>
+                  <div style="display:flex;gap:8px;align-items:center">
+                    <button id="createAccountBtn" class="secondary-button">New Account</button>
+                    <button id="deleteAccountBtn" class="danger-button">Delete</button>
+                  </div>
+              </div>
+            </div>
             <p id="loadStatus" class="load-status" aria-live="polite">Loading saved data...</p>
           </div>
         </header>
@@ -157,6 +167,7 @@
               <button id="monitorBtn" class="secondary-button" title="Refresh owned stock monitor">Refresh Holdings</button>
               <button id="exportBtn" class="secondary-button" title="Export results as CSV">Export CSV</button>
               <button id="clearBtn" class="secondary-button danger" title="Clear saved data">Clear All</button>
+              <input id="importCsvInput" type="file" accept=".csv,text/csv" style="display:none" />
             </div>
           </header>
 
@@ -245,7 +256,10 @@
             </div>
             <div class="toolbar">
               <button id="newBasketBtn" class="primary-button inline-btn">＋ Create Basket</button>
+              <button id="autoBasketBtn" class="secondary-button">Auto Baskets</button>
               <button id="refreshPortfolioBtn" class="secondary-button">Refresh Prices</button>
+              <button id="importCsvReplaceBtn" class="secondary-button" title="Replace holdings with CSV">Import CSV</button>
+              <button id="importCsvMergeBtn" class="secondary-button" title="Merge CSV into existing holdings">Merge CSV</button>
             </div>
           </header>
 
@@ -268,13 +282,6 @@
             </div>
           </section>
 
-          <section class="panel portfolio-holdings-panel">
-            <div class="panel-heading">
-              <h3>Purchased Holdings</h3>
-            </div>
-            <div id="holdingsList" class="holdings-list"></div>
-          </section>
-
           <div class="portfolio-controls-bar">
             <h3>Custom Baskets</h3>
             <div class="portfolio-sort">
@@ -291,6 +298,13 @@
           <div id="basketGrid" class="basket-grid">
             <!-- Dynamic basket cards with embedded collapsible stock lists rendered here -->
           </div>
+
+          <section class="panel portfolio-holdings-panel">
+            <div class="panel-heading">
+              <h3>Purchased Holdings</h3>
+            </div>
+            <div id="holdingsList" class="holdings-list"></div>
+          </section>
         </div>
       </section>
     </main>
@@ -331,6 +345,6 @@
       </div>
     </div>
 
-    <script src="app.js?v=9"></script>
+    <script src="app.js?v=16"></script>
   </body>
 </html>

@@ -123,11 +123,39 @@ def init_db():
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
-        # Analysis results table
+        # Accounts and per-account state
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS account_state (
+                account_id INTEGER PRIMARY KEY,
+                ticker_input TEXT,
+                macro_rates INTEGER DEFAULT 25,
+                macro_inflation INTEGER DEFAULT 20,
+                macro_growth INTEGER DEFAULT 25,
+                macro_risk INTEGER DEFAULT 13,
+                weight_macro INTEGER DEFAULT 25,
+                weight_fundamentals INTEGER DEFAULT 45,
+                weight_prospects INTEGER DEFAULT 30,
+                active_tab TEXT DEFAULT 'analyzer',
+                basket_sort TEXT DEFAULT 'value-desc',
+                basket_config TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
+            )
+        """)
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS analysis_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticker TEXT UNIQUE NOT NULL,
+                account_id INTEGER NOT NULL DEFAULT 1,
+                ticker TEXT NOT NULL,
                 pe REAL,
                 price REAL,
                 eps_growth REAL,
@@ -144,18 +172,62 @@ def init_db():
                 decision TEXT,
                 reasons TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
             )
         """)
 
         columns = [row[1] for row in cursor.execute("PRAGMA table_info(analysis_results)")]
         if "price" not in columns:
             cursor.execute("ALTER TABLE analysis_results ADD COLUMN price REAL")
-        
+        if "account_id" not in columns:
+            cursor.execute("ALTER TABLE analysis_results ADD COLUMN account_id INTEGER DEFAULT 1")
+            price_expr = "price" if "price" in columns else "NULL"
+            cursor.execute("""
+                CREATE TABLE analysis_results_tmp (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL DEFAULT 1,
+                    ticker TEXT NOT NULL,
+                    pe REAL,
+                    price REAL,
+                    eps_growth REAL,
+                    revenue_growth REAL,
+                    margin REAL,
+                    debt_equity REAL,
+                    fcf_yield REAL,
+                    sector TEXT,
+                    name TEXT,
+                    macro INTEGER,
+                    fundamentals INTEGER,
+                    prospects INTEGER,
+                    score INTEGER,
+                    decision TEXT,
+                    reasons TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
+                )
+            """)
+            cursor.execute(f"""
+                INSERT INTO analysis_results_tmp (
+                    account_id, ticker, pe, price, eps_growth, revenue_growth, margin,
+                    debt_equity, fcf_yield, sector, name, macro, fundamentals,
+                    prospects, score, decision, reasons, created_at, updated_at
+                )
+                SELECT 1, ticker, pe, {price_expr}, eps_growth, revenue_growth, margin,
+                    debt_equity, fcf_yield, sector, name, macro, fundamentals,
+                    prospects, score, decision, reasons, created_at, updated_at
+                FROM analysis_results
+            """)
+            cursor.execute("DROP TABLE analysis_results")
+            cursor.execute("ALTER TABLE analysis_results_tmp RENAME TO analysis_results")
+            columns = [row[1] for row in cursor.execute("PRAGMA table_info(analysis_results)")]
+
         # Purchased stocks table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS purchased_stocks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id INTEGER NOT NULL DEFAULT 1,
                 ticker TEXT NOT NULL,
                 shares REAL NOT NULL,
                 entry_price REAL NOT NULL,
@@ -171,9 +243,14 @@ def init_db():
                 pnl REAL,
                 gain_loss_pct REAL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
             )
         """)
+        columns = [row[1] for row in cursor.execute("PRAGMA table_info(purchased_stocks)")]
+        if "account_id" not in columns:
+            cursor.execute("ALTER TABLE purchased_stocks ADD COLUMN account_id INTEGER DEFAULT 1")
+            cursor.execute("UPDATE purchased_stocks SET account_id = 1 WHERE account_id IS NULL")
         
         # User state table
         cursor.execute("""
@@ -193,6 +270,32 @@ def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        default_account_id = None
+        cursor.execute("SELECT id FROM accounts ORDER BY id LIMIT 1")
+        row = cursor.fetchone()
+        if row:
+            default_account_id = row[0]
+        else:
+            cursor.execute("INSERT INTO accounts (name) VALUES (?)", ("Default",))
+            default_account_id = cursor.lastrowid
+
+        cursor.execute("SELECT account_id FROM account_state WHERE account_id = ?", (default_account_id,))
+        if not cursor.fetchone():
+            cursor.execute("SELECT * FROM user_state WHERE id = 1")
+            existing = cursor.fetchone()
+            if existing:
+                cursor.execute("""
+                    INSERT OR REPLACE INTO account_state (
+                        account_id, ticker_input, macro_rates, macro_inflation, macro_growth,
+                        macro_risk, weight_macro, weight_fundamentals, weight_prospects,
+                        active_tab, basket_sort, basket_config, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, (
+                    default_account_id,
+                    existing[1], existing[2], existing[3], existing[4], existing[5],
+                    existing[6], existing[7], existing[8], existing[9], existing[10], existing[11]
+                ))
         
         conn.commit()
         conn.close()
@@ -259,35 +362,52 @@ class StockHandler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
 
+    def get_account_id(self, parsed, body=None):
+        params = parse_qs(parsed.query)
+        account_id = params.get("account_id", [None])[0]
+        if body and isinstance(body, dict):
+            account_id = body.get("accountId") or body.get("account_id") or account_id
+        try:
+            return int(account_id)
+        except (TypeError, ValueError):
+            return 1
+
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/api/stocks":
             self.handle_stocks(parsed)
             return
+        elif parsed.path == "/api/accounts":
+            self.handle_list_accounts()
+            return
         elif parsed.path == "/api/state":
-            self.handle_load_state()
+            self.handle_load_state(parsed)
             return
         elif parsed.path == "/api/analysis":
-            self.handle_load_analysis()
+            self.handle_load_analysis(parsed)
             return
         elif parsed.path == "/api/holdings":
-            self.handle_load_holdings()
+            self.handle_load_holdings(parsed)
             return
         super().do_GET()
 
     def do_POST(self):
         parsed = urlparse(self.path)
         content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length).decode("utf-8") if content_length > 0 else "{}"
+        body_text = self.rfile.read(content_length).decode("utf-8") if content_length > 0 else "{}"
+        body = json.loads(body_text)
         
-        if parsed.path == "/api/state":
-            self.handle_save_state(json.loads(body))
+        if parsed.path == "/api/accounts":
+            self.handle_create_account(body)
+            return
+        elif parsed.path == "/api/state":
+            self.handle_save_state(parsed, body)
             return
         elif parsed.path == "/api/analysis":
-            self.handle_save_analysis(json.loads(body))
+            self.handle_save_analysis(parsed, body)
             return
         elif parsed.path == "/api/holdings":
-            self.handle_save_holdings(json.loads(body))
+            self.handle_save_holdings(parsed, body)
             return
         
         self.write_json({"error": "Not found"}, 404)
@@ -296,9 +416,71 @@ class StockHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         path_parts = [part for part in parsed.path.split("/") if part]
         if len(path_parts) == 3 and path_parts[0] == "api" and path_parts[1] == "holdings":
-            self.handle_delete_holding(path_parts[2])
+            self.handle_delete_holding(parsed, path_parts[2])
+            return
+        if len(path_parts) == 3 and path_parts[0] == "api" and path_parts[1] == "accounts":
+            self.handle_delete_account(path_parts[2])
             return
         self.write_json({"error": "Not found"}, 404)
+
+    def handle_list_accounts(self):
+        with DB_LOCK:
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, name FROM accounts ORDER BY id")
+            rows = cursor.fetchall()
+            conn.close()
+
+        accounts = [{"id": row["id"], "name": row["name"]} for row in rows]
+        self.write_json({"accounts": accounts})
+
+    def handle_create_account(self, data):
+        name = str(data.get("name", "")).strip()
+        if not name:
+            self.write_json({"error": "Account name is required."}, 400)
+            return
+
+        with DB_LOCK:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            try:
+                cursor.execute("INSERT INTO accounts (name) VALUES (?)", (name,))
+                account_id = cursor.lastrowid
+                conn.commit()
+            except sqlite3.IntegrityError:
+                conn.close()
+                self.write_json({"error": "An account with that name already exists."}, 400)
+                return
+            conn.close()
+
+        self.write_json({"success": True, "account": {"id": account_id, "name": name}})
+
+    def handle_delete_account(self, account_id_str):
+        try:
+            account_id = int(account_id_str)
+        except ValueError:
+            self.write_json({"error": "Invalid account id."}, 400)
+            return
+
+        with DB_LOCK:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM accounts")
+            total = cursor.fetchone()[0]
+            if total <= 1:
+                conn.close()
+                self.write_json({"error": "At least one account must remain."}, 400)
+                return
+
+            cursor.execute("DELETE FROM account_state WHERE account_id = ?", (account_id,))
+            cursor.execute("DELETE FROM analysis_results WHERE account_id = ?", (account_id,))
+            cursor.execute("DELETE FROM purchased_stocks WHERE account_id = ?", (account_id,))
+            cursor.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+            conn.commit()
+            conn.close()
+
+        self.write_json({"success": True})
 
     def handle_stocks(self, parsed):
         params = parse_qs(parsed.query)
@@ -313,7 +495,7 @@ class StockHandler(SimpleHTTPRequestHandler):
 
         stocks = []
         errors = []
-        for symbol in symbols[:25]:
+        for symbol in symbols:
             try:
                 stock = fetch_quote(symbol)
                 stocks.append(stock)
@@ -325,14 +507,18 @@ class StockHandler(SimpleHTTPRequestHandler):
 
         self.write_json({"stocks": stocks, "errors": errors})
 
-    def handle_load_state(self):
+    def handle_load_state(self, parsed):
         """Load user state (macro inputs, weights, active tab, etc.)"""
+        account_id = self.get_account_id(parsed)
         with DB_LOCK:
             conn = sqlite3.connect(DB_PATH)
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM user_state WHERE id = 1")
+            cursor.execute("SELECT * FROM account_state WHERE account_id = ?", (account_id,))
             row = cursor.fetchone()
+            if not row and account_id == 1:
+                cursor.execute("SELECT * FROM user_state WHERE id = 1")
+                row = cursor.fetchone()
             conn.close()
         
         if row:
@@ -365,20 +551,22 @@ class StockHandler(SimpleHTTPRequestHandler):
                 "baskets": []
             })
 
-    def handle_save_state(self, data):
+    def handle_save_state(self, parsed, data):
         """Save user state to database"""
+        account_id = self.get_account_id(parsed, data)
         with DB_LOCK:
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             
             basket_config = json.dumps(data.get("baskets", []))
             cursor.execute("""
-                INSERT OR REPLACE INTO user_state (
-                    id, ticker_input, macro_rates, macro_inflation, macro_growth, macro_risk,
+                INSERT OR REPLACE INTO account_state (
+                    account_id, ticker_input, macro_rates, macro_inflation, macro_growth, macro_risk,
                     weight_macro, weight_fundamentals, weight_prospects, active_tab, 
                     basket_sort, basket_config, updated_at
-                ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             """, (
+                account_id,
                 data.get("tickerInput", ""),
                 data.get("macro", {}).get("rates", 25),
                 data.get("macro", {}).get("inflation", 20),
@@ -396,14 +584,29 @@ class StockHandler(SimpleHTTPRequestHandler):
         
         self.write_json({"success": True})
 
-    def handle_load_analysis(self):
+    def handle_load_analysis(self, parsed):
         """Load all analysis results from database"""
+        account_id = self.get_account_id(parsed)
         with DB_LOCK:
             conn = sqlite3.connect(DB_PATH)
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM analysis_results ORDER BY score DESC")
+            cursor.execute("SELECT * FROM analysis_results WHERE account_id = ? ORDER BY score DESC", (account_id,))
             rows = cursor.fetchall()
+            loaded_tickers = {row['ticker'] for row in rows}
+            cursor.execute("SELECT DISTINCT ticker FROM purchased_stocks WHERE account_id = ?", (account_id,))
+            holding_tickers = [row['ticker'] for row in cursor.fetchall()]
+            missing_tickers = [ticker for ticker in holding_tickers if ticker not in loaded_tickers]
+            for ticker in missing_tickers:
+                cursor.execute("""
+                    SELECT * FROM analysis_results
+                    WHERE ticker = ? AND score IS NOT NULL
+                    ORDER BY updated_at DESC, id DESC
+                    LIMIT 1
+                """, (ticker,))
+                fallback = cursor.fetchone()
+                if fallback:
+                    rows.append(fallback)
             conn.close()
         
         results = []
@@ -430,23 +633,25 @@ class StockHandler(SimpleHTTPRequestHandler):
         
         self.write_json({"analysis": results})
 
-    def handle_save_analysis(self, data):
+    def handle_save_analysis(self, parsed, data):
         """Save analysis results to database"""
+        account_id = self.get_account_id(parsed, data)
         with DB_LOCK:
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
 
             if data.get("results") is None:
-                cursor.execute("DELETE FROM analysis_results")
+                cursor.execute("DELETE FROM analysis_results WHERE account_id = ?", (account_id,))
             else:
-                cursor.execute("DELETE FROM analysis_results")
+                cursor.execute("DELETE FROM analysis_results WHERE account_id = ?", (account_id,))
                 for result in data.get("results", []):
                     cursor.execute("""
                         INSERT OR REPLACE INTO analysis_results (
-                            ticker, pe, price, eps_growth, revenue_growth, margin, debt_equity, fcf_yield,
+                            account_id, ticker, pe, price, eps_growth, revenue_growth, margin, debt_equity, fcf_yield,
                             sector, name, macro, fundamentals, prospects, score, decision, reasons, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """, (
+                        account_id,
                         result.get("ticker"),
                         result.get("pe"),
                         result.get("price"),
@@ -470,13 +675,14 @@ class StockHandler(SimpleHTTPRequestHandler):
 
         self.write_json({"success": True})
 
-    def handle_load_holdings(self):
+    def handle_load_holdings(self, parsed):
         """Load all purchased stocks from database"""
+        account_id = self.get_account_id(parsed)
         with DB_LOCK:
             conn = sqlite3.connect(DB_PATH)
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM purchased_stocks ORDER BY ticker ASC")
+            cursor.execute("SELECT * FROM purchased_stocks WHERE account_id = ? ORDER BY ticker ASC", (account_id,))
             rows = cursor.fetchall()
             conn.close()
         
@@ -501,21 +707,23 @@ class StockHandler(SimpleHTTPRequestHandler):
         
         self.write_json({"holdings": holdings})
 
-    def handle_save_holdings(self, data):
+    def handle_save_holdings(self, parsed, data):
         """Save purchased stocks to database"""
+        account_id = self.get_account_id(parsed, data)
         with DB_LOCK:
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
 
-            cursor.execute("DELETE FROM purchased_stocks")
+            cursor.execute("DELETE FROM purchased_stocks WHERE account_id = ?", (account_id,))
             for holding in data.get("holdings", []):
                 cursor.execute("""
                     INSERT INTO purchased_stocks (
-                        ticker, shares, entry_price, target_price, stop_loss, basket,
+                        account_id, ticker, shares, entry_price, target_price, stop_loss, basket,
                         source_idea, purchased_at, last_price, last_score, last_decision,
                         market_value, pnl, gain_loss_pct, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """, (
+                    account_id,
                     holding.get("ticker"),
                     holding.get("shares"),
                     holding.get("entryPrice"),
@@ -537,13 +745,14 @@ class StockHandler(SimpleHTTPRequestHandler):
 
         self.write_json({"success": True})
 
-    def handle_delete_holding(self, ticker):
+    def handle_delete_holding(self, parsed, ticker):
         """Delete a single purchased stock"""
         ticker = clean_symbol(ticker)
+        account_id = self.get_account_id(parsed)
         with DB_LOCK:
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM purchased_stocks WHERE ticker = ?", (ticker,))
+            cursor.execute("DELETE FROM purchased_stocks WHERE ticker = ? AND account_id = ?", (ticker, account_id))
             conn.commit()
             conn.close()
         self.write_json({"success": True})

@@ -778,6 +778,37 @@ tbody tr.selected {
   justify-content: flex-end;
 }
 
+.account-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.account-controls label {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 0;
+}
+
+.account-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.account-actions select {
+  min-width: 170px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.account-actions button {
+  white-space: nowrap;
+}
+
 .nav-tabs {
   display: flex;
   gap: 8px;

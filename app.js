@@ -11,6 +11,8 @@ const state = {
   stocks: [],
   results: [],
   holdings: [],
+  accounts: [],
+  accountId: null,
   baskets: [
     { id: "b-general", name: "General", description: "Default stock holdings", color: "slate" },
     { id: "b-ai-tech", name: "AI & Tech", description: "Artificial intelligence and software leaders", color: "emerald" },
@@ -34,12 +36,19 @@ const elements = {
   tabPortfolio: document.getElementById("tabPortfolio"),
   analyzerPage: document.getElementById("analyzerPage"),
   portfolioPage: document.getElementById("portfolioPage"),
+  accountSelect: document.getElementById("accountSelect"),
+  createAccountBtn: document.getElementById("createAccountBtn"),
+  deleteAccountBtn: document.getElementById("deleteAccountBtn"),
+  autoBasketBtn: document.getElementById("autoBasketBtn"),
 
   // Original Sidebar Elements
   tickerInput: document.getElementById("tickerInput"),
   analyzeBtn: document.getElementById("analyzeBtn"),
   loadSampleBtn: document.getElementById("loadSampleBtn"),
   exportBtn: document.getElementById("exportBtn"),
+  importCsvReplaceBtn: document.getElementById("importCsvReplaceBtn"),
+  importCsvMergeBtn: document.getElementById("importCsvMergeBtn"),
+  importCsvInput: document.getElementById("importCsvInput"),
   clearBtn: document.getElementById("clearBtn"),
   holdingTickerInput: document.getElementById("holdingTickerInput"),
   sharesInput: document.getElementById("sharesInput"),
@@ -88,6 +97,7 @@ const elements = {
   refreshPortfolioBtn: document.getElementById("refreshPortfolioBtn"),
   basketSortSelect: document.getElementById("basketSortSelect"),
   basketGrid: document.getElementById("basketGrid"),
+  autoBasketBtn: document.getElementById("autoBasketBtn"),
   loadStatus: document.getElementById("loadStatus"),
 
   // Basket CRUD Modal Elements
@@ -130,8 +140,166 @@ function setLoadStatus(message, tone = "info") {
 }
 
 function parseNumber(value) {
-  const parsed = Number.parseFloat(String(value ?? "").trim());
+  if (value == null) return null;
+  let text = String(value).trim();
+  if (!text) return null;
+  // Handle parentheses for negative values: (1,234.56)
+  if (/^\(.*\)$/.test(text)) {
+    text = "-" + text.replace(/^\(|\)$/g, "");
+  }
+  // Remove common currency characters and grouping commas
+  text = text.replace(/[$,\s\+]/g, "");
+  if (!text || text.toLowerCase() === "n/a") return null;
+  // Percent values may be provided; keep as-is (user-facing percent parsing handled elsewhere)
+  if (text.endsWith("%")) {
+    const num = Number.parseFloat(text.slice(0, -1));
+    return Number.isFinite(num) ? num : null;
+  }
+  const parsed = Number.parseFloat(text);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseCsvLine(line) {
+  const cells = [];
+  const regex = /(?:^|,)("([^"]*(?:""[^"]*)*)"|[^,]*)/g;
+  let match;
+  while ((match = regex.exec(line)) !== null) {
+    let value = match[2] !== undefined ? match[2].replace(/""/g, '"') : match[1] || '';
+    if (value.startsWith(',')) value = value.slice(1);
+    cells.push(value.trim());
+  }
+  return cells;
+}
+
+function accountQuery(url) {
+  if (!state.accountId) return url;
+  return `${url}${url.includes('?') ? '&' : '?'}account_id=${encodeURIComponent(state.accountId)}`;
+}
+
+function accountBody(data = {}) {
+  return { ...data, accountId: state.accountId };
+}
+
+function parseHoldingsCsv(text) {
+  const rows = text.replace(/\r\n/g, "\n").split("\n").map((line) => line.trim()).filter(Boolean);
+  if (!rows.length) return [];
+
+  const headers = parseCsvLine(rows[0]).map((header) => header.trim().toLowerCase().replace(/\s+/g, ""));
+  const aliases = {
+    ticker: "symbol",
+    qty: "quantity",
+    shares: "quantity",
+    averagecost: "averageCost",
+    averagecostbasis: "averageCost",
+    costbasistotal: "costBasisTotal",
+    lastprice: "lastPrice",
+    currentvalue: "marketValue",
+    todaysgainlossdollar: "pnl",
+    totalgainlossdollar: "pnl",
+    todaysgainlosspercent: "gainLossPct",
+    totalgainlosspercent: "gainLossPct",
+    targetprice: "targetPrice",
+    stoploss: "stopLoss",
+    sourceidea: "sourceIdea",
+    purchasedat: "purchasedAt"
+  };
+
+  return rows.slice(1).map((line) => {
+    const values = parseCsvLine(line);
+    const record = {};
+    headers.forEach((key, index) => {
+      const normalizedKey = aliases[key] || key;
+      record[normalizedKey] = values[index] ?? "";
+    });
+
+    const ticker = normalizeTicker(record.symbol || record.ticker || record.description);
+    const shares = parseNumber(record.quantity || record.qty || record.shares);
+    const averageCost = parseNumber(record.averageCost || record.averagecost || record["averagecost"]);
+    const costBasisTotal = parseNumber(record.costBasisTotal || record.costbasistotal || record["costbasistotal"]);
+    const lastPrice = parseNumber(record.lastPrice || record.lastprice || record.currentprice || record["currentprice"] || record.lastpricechange);
+    const targetPrice = parseNumber(record.targetPrice || record.targetprice || record["targetprice"]);
+    const stopLoss = parseNumber(record.stopLoss || record.stoploss || record["stoploss"]);
+    const entryPrice = averageCost ?? (costBasisTotal && shares ? costBasisTotal / shares : null) ?? lastPrice ?? null;
+
+    return normalizeHolding({
+      ticker,
+      shares: shares ?? 0,
+      entryPrice: entryPrice ?? 0,
+      targetPrice,
+      stopLoss,
+      basket: record.basket || "General",
+      sourceIdea: record.sourceIdea || record.source || record["source"] || "",
+      purchasedAt: record.purchasedAt || record.purchasedat || record["purchasedat"] || new Date().toISOString(),
+      lastPrice,
+      lastDecision: record.decision || null,
+      marketValue: parseNumber(record.marketValue || record.currentvalue || record["currentvalue"]),
+      pnl: parseNumber(record.pnl || record.todaysgainlossdollar || record["todaysgainlossdollar"] || record.totalgainlossdollar || record["totalgainlossdollar"]),
+      gainLossPct: parseNumber(record.gainLossPct || record.todaysgainlosspercent || record["todaysgainlosspercent"] || record.totalgainlosspercent || record["totalgainlosspercent"])
+    });
+  }).filter((holding) => holding.ticker && holding.shares > 0);
+}
+
+let importCsvMode = "replace";
+
+function importHoldingsFromCsv(file, mode = "replace") {
+  const reader = new FileReader();
+  reader.onload = async () => {
+    let importedHoldings = parseHoldingsCsv(String(reader.result ?? ""));
+    if (!importedHoldings.length) {
+      alert("No valid holdings were found in the CSV file.");
+      return;
+    }
+
+    const invalidFormat = importedHoldings
+      .filter((holding) => !isValidTickerFormat(holding.ticker))
+      .map((holding) => holding.ticker);
+    if (invalidFormat.length) {
+      importedHoldings = importedHoldings.filter((holding) => isValidTickerFormat(holding.ticker));
+      alert(
+        `The following symbols were skipped because they do not match valid ticker format: ${invalidFormat.join(", ")}`
+      );
+      if (!importedHoldings.length) {
+        alert("No valid holdings remain after filtering invalid symbol format.");
+        return;
+      }
+    }
+
+    if (mode === "merge" && state.holdings.length > 0) {
+      const importedByTicker = new Map(importedHoldings.map((holding) => [holding.ticker, holding]));
+      const currentByTicker = new Map(state.holdings.map((holding) => [holding.ticker, holding]));
+      const updatedHoldings = importedHoldings.map((importedHolding) => {
+        const existingHolding = currentByTicker.get(importedHolding.ticker);
+        return normalizeHolding({
+          ...(existingHolding ?? {}),
+          ...importedHolding,
+          purchasedAt: existingHolding?.purchasedAt ?? importedHolding.purchasedAt,
+          lastPrice: existingHolding?.lastPrice ?? importedHolding.lastPrice,
+          lastScore: existingHolding?.lastScore ?? importedHolding.lastScore,
+          lastDecision: existingHolding?.lastDecision ?? importedHolding.lastDecision,
+          lastRating: existingHolding?.lastRating ?? importedHolding.lastRating,
+          lastTargetUpside: existingHolding?.lastTargetUpside ?? importedHolding.lastTargetUpside,
+          monitorAction: existingHolding?.monitorAction ?? importedHolding.monitorAction,
+          monitorMessage: existingHolding?.monitorMessage ?? importedHolding.monitorMessage,
+          lastChecked: existingHolding?.lastChecked ?? importedHolding.lastChecked
+        });
+      });
+      const preservedHoldings = state.holdings
+        .filter((existingHolding) => !importedByTicker.has(existingHolding.ticker))
+        .map((holding) => normalizeHolding(holding));
+      state.holdings = [...updatedHoldings, ...preservedHoldings].sort((a, b) => a.ticker.localeCompare(b.ticker));
+    } else {
+      state.holdings = importedHoldings.map(normalizeHolding);
+    }
+    saveState();
+    saveHoldings();
+    render();
+    monitorHoldings();
+    alert(`${importedHoldings.length} holdings imported successfully.`);
+  };
+  reader.onerror = () => {
+    alert("Unable to read the selected CSV file.");
+  };
+  reader.readAsText(file);
 }
 
 function parseStocks(rawText) {
@@ -224,9 +392,13 @@ function ensureBasketExists(basketName) {
 function normalizeTicker(value) {
   return String(value ?? "")
     .trim()
-    .replace(/[^A-Za-z.-]/g, "")
+    .replace(/[^A-Za-z0-9.-]/g, "")
     .toUpperCase()
     .slice(0, 8);
+}
+
+function isValidTickerFormat(ticker) {
+  return /^[A-Z0-9.-]{1,8}$/.test(String(ticker || "").trim());
 }
 
 function macroScore(stock) {
@@ -435,6 +607,10 @@ function analyzeStock(stock) {
   });
 }
 
+function decisionForScore(score) {
+  return score >= 72 ? "Buy" : score >= 55 ? "Watch" : "Avoid";
+}
+
 function getReasons(stock, scores) {
   const reasons = [];
   if (stock.error) reasons.push(stock.error);
@@ -455,10 +631,131 @@ function isHolding(ticker) {
   return state.holdings.some((holding) => holding.ticker === ticker);
 }
 
-function getAnalysisForTicker(ticker) {
+function getSavedAnalysisForTicker(ticker) {
+  const result = state.results.find((item) => item.ticker === ticker);
+  return Number.isFinite(Number(result?.score)) ? result : null;
+}
+
+function getAnalysisForTicker(ticker, options = {}) {
+  const { allowEstimate = true } = options;
   const fromResults = state.results.find((result) => result.ticker === ticker);
   if (fromResults) return fromResults;
+  if (!allowEstimate) return null;
   return analyzeStock({ ticker });
+}
+
+function getAnalysisForHolding(holding) {
+  const fromResults = getSavedAnalysisForTicker(holding.ticker);
+  if (fromResults) return fromResults;
+
+  const hasLastScore = holding.lastScore !== null && holding.lastScore !== undefined && holding.lastScore !== "";
+  const lastScore = hasLastScore ? Number(holding.lastScore) : null;
+  if (Number.isFinite(lastScore)) {
+    const score = Math.round(clamp(lastScore));
+    return {
+      ticker: holding.ticker,
+      sector: getProfile(holding).sector,
+      price: holding.lastPrice ?? holding.entryPrice ?? null,
+      score,
+      decision: holding.lastDecision || decisionForScore(score),
+      macro: null,
+      fundamentals: null,
+      prospects: null,
+      targetPrice: holding.targetPrice ?? null,
+      targetBase: holding.targetPrice ?? null,
+      targetUpside: holding.lastTargetUpside ?? null,
+      reasons: ["Last refreshed portfolio score."]
+    };
+  }
+
+  return null;
+}
+
+function formatConvictionScore(score) {
+  if (score === null || score === undefined || score === "") return "—";
+  const numericScore = Number(score);
+  return Number.isFinite(numericScore) ? String(Math.round(numericScore)) : "—";
+}
+
+function convictionCellMarkup(analysis) {
+  if (!analysis) {
+    return `<span class="decision-pill decision-watch" title="Refresh holdings to calculate conviction">—</span>`;
+  }
+  return `<span class="decision-pill ${decisionClass(analysis.decision)}">${formatConvictionScore(analysis.score)}</span>`;
+}
+
+function inferredBasketNameForHolding(holding) {
+  const ticker = normalizeTicker(holding.ticker);
+  const thematicBaskets = {
+    AMD: "Semiconductors",
+    ASML: "Semiconductor Equipment",
+    BBAI: "AI Software",
+    COHR: "Optical & Photonics",
+    ENPH: "Clean Energy",
+    INFQ: "AI & Data Infrastructure",
+    IPGP: "Optical & Photonics",
+    MCHP: "Semiconductors",
+    MU: "Semiconductors",
+    NVDA: "Semiconductors",
+    QCOM: "Semiconductors",
+    TSM: "Semiconductors",
+    DOCN: "Cloud Software",
+    IBM: "Enterprise Software",
+    MSFT: "Enterprise Software",
+    MTSI: "Semiconductors",
+    ORCL: "Enterprise Software",
+    SOUN: "AI Software",
+    IONQ: "Quantum Computing",
+    QBTS: "Quantum Computing",
+    QUBT: "Quantum Computing",
+    RGTI: "Quantum Computing",
+    AVAV: "Robotics & Defense",
+    LASR: "Robotics & Defense",
+    ONDS: "Robotics & Defense",
+    RCAT: "Robotics & Defense",
+    SERV: "Robotics & Defense",
+    SWMR: "Robotics & Defense",
+    TAYD: "Industrials",
+    VRT: "AI & Data Infrastructure"
+  };
+  if (thematicBaskets[ticker]) return thematicBaskets[ticker];
+
+  const etfTickers = new Set(["IBIT", "INDY", "JEPI", "VBK", "VEA", "VOO", "XBI", "XLC"]);
+  if (ticker === "IBIT") return "Crypto";
+  if (etfTickers.has(ticker)) return "ETF";
+
+  const analysis = getAnalysisForHolding(holding);
+  const rawSector = String(analysis?.sector || getProfile(holding).sector || "").trim();
+  const sector = rawSector.toLowerCase();
+  const sectorMap = {
+    "consumer discretionary": "Consumer Discretionary",
+    "consumer cyclical": "Consumer Discretionary",
+    "consumer defensive": "Consumer Defensive",
+    "consumer staples": "Consumer Defensive",
+    "consumer internet": "Consumer Discretionary",
+    "communication services": "Communication Services",
+    "digital advertising": "Communication Services",
+    "financial services": "Financials",
+    "financials": "Financials",
+    "banking": "Financials",
+    "real estate": "Real Estate",
+    "realestate": "Real Estate",
+    "basic materials": "Materials",
+    "healthcare": "Healthcare",
+    "health care": "Healthcare",
+    "industrials": "Industrials",
+    "energy": "Energy",
+    "utilities": "Utilities",
+    "technology": "Technology",
+    "software": "Technology",
+    "semiconductors": "Semiconductors",
+    "semiconductor": "Semiconductors",
+    "consumer technology": "Technology",
+    "autos": "Consumer Discretionary",
+    "telecom": "Communication Services"
+  };
+
+  return sectorMap[sector] || (rawSector && sector !== "unclassified" ? rawSector : "General");
 }
 
 function getReplacementSuggestion(candidate) {
@@ -481,9 +778,17 @@ function getReplacementSuggestion(candidate) {
   const holdingsByScore = state.holdings
     .map((holding) => ({
       ...holding,
-      analysis: getAnalysisForTicker(holding.ticker)
+      analysis: getAnalysisForHolding(holding)
     }))
+    .filter((holding) => holding.analysis)
     .sort((a, b) => a.analysis.score - b.analysis.score);
+  if (!holdingsByScore.length) {
+    return {
+      action: "None",
+      label: "Refresh Holdings",
+      detail: "Refresh holdings to compare candidate conviction against owned stocks."
+    };
+  }
   const weakest = holdingsByScore[0];
   const scoreGap = candidate.score - weakest.analysis.score;
   const shouldReplace = candidate.decision === "Buy" && scoreGap >= 8;
@@ -677,8 +982,23 @@ async function runAnalysis() {
     rawText = sampleRows.join("\n");
     elements.tickerInput.value = rawText;
   }
+  await analyzeTickers(rawText);
+}
+
+async function analyzeTickers(rawTextOrTickers) {
+  let rawText;
+  if (Array.isArray(rawTextOrTickers)) {
+    rawText = rawTextOrTickers.filter(Boolean).join(",");
+  } else {
+    rawText = String(rawTextOrTickers || "").trim();
+  }
+  if (!rawText) {
+    rawText = sampleRows.join("\n");
+  }
+
   elements.analyzeBtn.disabled = true;
   elements.analyzeBtn.textContent = shouldFetchOnline(rawText) ? "Fetching Online..." : "Analyzing...";
+
   let stocks = parseStocks(rawText);
   state.onlineErrors = [];
 
@@ -693,7 +1013,8 @@ async function runAnalysis() {
   }
 
   state.stocks = stocks;
-  state.results = stocks.map(analyzeStock).sort((a, b) => b.score - a.score);
+  const newResults = stocks.map(analyzeStock).sort((a, b) => b.score - a.score);
+  mergeOwnedAnalysesIntoResults(newResults);
   state.selectedTicker = state.results[0]?.ticker ?? null;
   buildRecommendations();
   saveState();
@@ -804,14 +1125,14 @@ function renderHoldings() {
         <tbody>
           ${[...baskets.entries()].flatMap(([basketName, holdings]) => 
             holdings.map((holding) => {
-              const analysis = getAnalysisForTicker(holding.ticker);
+              const analysis = getAnalysisForHolding(holding);
               const currentPrice = holding.lastPrice ?? holding.entryPrice;
               const marketValue = holding.shares * currentPrice;
               const pnl = marketValue - (holding.shares * holding.entryPrice);
               const pnlPct = holding.entryPrice > 0 ? (pnl / (holding.shares * holding.entryPrice)) * 100 : 0;
               const pnlClass = pnl >= 0 ? (pnl > 0 ? "pnl-positive" : "pnl-neutral") : "pnl-negative";
               const source = holding.sourceIdea ? holding.sourceIdea : "—";
-              const targetPrice = holding.targetPrice ?? analysis.targetPrice ?? null;
+              const targetPrice = holding.targetPrice ?? analysis?.targetPrice ?? null;
               const targetDisplay = targetPrice == null ? "—" : `$${formatMoney(targetPrice)}`;
               return `
                 <tr>
@@ -822,7 +1143,7 @@ function renderHoldings() {
                   <td>${targetDisplay}</td>
                   <td>${holding.stopLoss ? `$${formatMoney(holding.stopLoss)}` : "—"}</td>
                   <td>$${formatMoney(currentPrice)}</td>
-                  <td><span class="decision-pill ${decisionClass(analysis.decision)}">${analysis.score}</span></td>
+                  <td>${convictionCellMarkup(analysis)}</td>
                   <td>${source}</td>
                   <td>
                     <button class="remove-holding" data-remove-holding="${holding.ticker}" title="Remove ${holding.ticker}" aria-label="Remove ${holding.ticker}">×</button>
@@ -1049,7 +1370,7 @@ function addOrUpdateHolding(holding) {
 }
 
 function removeHolding(ticker) {
-  fetch(`/api/holdings/${encodeURIComponent(ticker)}`, { method: "DELETE" })
+  fetch(accountQuery(`/api/holdings/${encodeURIComponent(ticker)}`), { method: "DELETE" })
     .then((res) => res.json())
     .then((data) => {
       if (!data.success) {
@@ -1092,9 +1413,44 @@ function normalizeHolding(holding) {
 
 function updateBasketDatalist() {
   if (!elements.basketDatalist) return;
-  elements.basketDatalist.innerHTML = state.baskets
+  elements.basketDatalist.innerHTML = getAvailableBaskets()
     .map((b) => `<option value="${b.name}">`)
     .join("");
+}
+
+function getAvailableBaskets() {
+  const byName = new Map();
+  state.baskets.forEach((basket) => {
+    if (basket?.name) byName.set(basket.name.toLowerCase(), basket);
+  });
+
+  state.holdings.forEach((holding) => {
+    const name = String(holding.basket || "General").trim() || "General";
+    const key = name.toLowerCase();
+    if (!byName.has(key)) {
+      byName.set(key, {
+        id: `b-${key.replace(/[^a-z0-9]+/g, "-")}`,
+        name,
+        description: `Auto-created basket for ${name}`,
+        color: "slate"
+      });
+    }
+  });
+
+  return [...byName.values()].sort((a, b) => {
+    if (a.name.toLowerCase() === "general") return -1;
+    if (b.name.toLowerCase() === "general") return 1;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+function syncBasketsFromHoldings() {
+  const available = getAvailableBaskets();
+  const changed = available.length !== state.baskets.length
+    || available.some((basket) => !state.baskets.some((existing) => existing.name.toLowerCase() === basket.name.toLowerCase()));
+  state.baskets = available;
+  updateBasketDatalist();
+  return changed;
 }
 
 function saveState() {
@@ -1116,10 +1472,10 @@ function saveState() {
     baskets: state.baskets
   };
   
-  fetch("/api/state", {
+  fetch(accountQuery("/api/state"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(stateData)
+    body: JSON.stringify(accountBody(stateData))
   }).catch(err => console.warn("Failed to save state:", err));
 }
 
@@ -1128,26 +1484,26 @@ function saveAnalysis() {
 
   const normalizedResults = state.results.map((result) => hydrateTargetModel(result));
 
-  fetch("/api/analysis", {
+  fetch(accountQuery("/api/analysis"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ results: normalizedResults })
+    body: JSON.stringify(accountBody({ results: normalizedResults }))
   }).catch(err => console.warn("Failed to save analysis:", err));
 }
 
 function saveHoldings() {
   if (!state.holdings.length) return;
   
-  fetch("/api/holdings", {
+  fetch(accountQuery("/api/holdings"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ holdings: state.holdings })
+    body: JSON.stringify(accountBody({ holdings: state.holdings }))
   }).catch(err => console.warn("Failed to save holdings:", err));
 }
 
 function loadState() {
   setLoadStatus("Loading saved data...", "info");
-  fetch("/api/state")
+  fetch(accountQuery("/api/state"))
     .then(res => res.json())
     .then(data => {
       elements.tickerInput.value = data.tickerInput ?? sampleRows.join("\n");
@@ -1159,6 +1515,7 @@ function loadState() {
       elements.fundamentalWeight.value = data.weights?.fundamentals ?? elements.fundamentalWeight.value;
       elements.prospectWeight.value = data.weights?.prospects ?? elements.prospectWeight.value;
       
+      state.baskets = [];
       if (Array.isArray(data.baskets) && data.baskets.length > 0) {
         state.baskets = data.baskets;
       }
@@ -1180,11 +1537,12 @@ function loadState() {
       }
       
       updateBasketDatalist();
-      loadAnalysis();
-      loadHoldings();
-      switchTab(state.activeTab);
-      render();
-      setLoadStatus("Saved data loaded.", "success");
+      Promise.all([loadAnalysis(), loadHoldings()])
+        .then(() => {
+          switchTab(state.activeTab);
+          render();
+          setLoadStatus("Saved data loaded.", "success");
+        });
     })
     .catch(err => {
       console.warn("Failed to load state from database:", err);
@@ -1196,7 +1554,7 @@ function loadState() {
 }
 
 function loadAnalysis() {
-  fetch("/api/analysis")
+  return fetch(accountQuery("/api/analysis"))
     .then(res => res.json())
     .then(data => {
       const savedAnalysis = Array.isArray(data.analysis) ? data.analysis : [];
@@ -1224,19 +1582,83 @@ function loadAnalysis() {
 }
 
 function loadHoldings() {
-  fetch("/api/holdings")
+  return fetch(accountQuery("/api/holdings"))
     .then(res => res.json())
     .then(data => {
       state.holdings = Array.isArray(data.holdings)
         ? data.holdings.map(normalizeHolding).filter((holding) => holding.ticker && holding.entryPrice > 0)
         : [];
+      const basketsChanged = syncBasketsFromHoldings();
       buildRecommendations();
+      if (basketsChanged) saveState();
       render();
       setLoadStatus("Saved holdings loaded.", "success");
     })
     .catch(err => {
       console.warn("Failed to load holdings from database:", err);
       setLoadStatus("Unable to load saved holdings.", "error");
+    });
+}
+
+function updateAccountOptions() {
+  if (!elements.accountSelect) return;
+  elements.accountSelect.innerHTML = state.accounts
+    .map((account) => `<option value="${account.id}">${account.name}</option>`)
+    .join("");
+  if (state.accountId) {
+    elements.accountSelect.value = String(state.accountId);
+  }
+}
+
+function loadAccounts() {
+  fetch("/api/accounts")
+    .then((res) => res.json())
+    .then((data) => {
+      state.accounts = Array.isArray(data.accounts) ? data.accounts : [];
+      if (!state.accounts.length) {
+        return createAccount("Default");
+      }
+
+      const storedId = Number(localStorage.getItem("selectedAccountId"));
+      const selected = state.accounts.find((account) => account.id === storedId) || state.accounts[0];
+      state.accountId = selected.id;
+      updateAccountOptions();
+      localStorage.setItem("selectedAccountId", state.accountId);
+      loadState();
+    })
+    .catch((err) => {
+      console.warn("Failed to load accounts:", err);
+      setLoadStatus("Unable to load account list.", "error");
+    });
+}
+
+function changeAccount(accountId) {
+  state.accountId = Number(accountId);
+  localStorage.setItem("selectedAccountId", state.accountId);
+  updateAccountOptions();
+  loadState();
+}
+
+function createAccount(promptName) {
+  const name = promptName || prompt("Enter a new account name:");
+  if (!name || !name.trim()) return Promise.resolve();
+
+  return fetch("/api/accounts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: name.trim() })
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      if (data.error) {
+        alert(data.error);
+        return;
+      }
+      return loadAccounts();
+    })
+    .catch((err) => {
+      console.warn("Failed to create account:", err);
+      alert("Unable to create a new account.");
     });
 }
 
@@ -1276,23 +1698,30 @@ function getBasketMetrics(basketName) {
   let marketValue = 0;
   let scoreSum = 0;
   let weightedScoreSum = 0;
+  let scoreCount = 0;
+  let scoredMarketValue = 0;
   
   basketHoldings.forEach((h) => {
-    const analysis = getAnalysisForTicker(h.ticker);
+    const analysis = getAnalysisForHolding(h);
     const cost = h.shares * h.entryPrice;
     const value = h.shares * (h.lastPrice ?? h.entryPrice);
+    const score = Number(analysis?.score);
     
     costBasis += cost;
     marketValue += value;
-    scoreSum += analysis.score;
-    weightedScoreSum += (analysis.score * value);
+    if (Number.isFinite(score)) {
+      scoreSum += score;
+      scoreCount += 1;
+      weightedScoreSum += (score * value);
+      scoredMarketValue += value;
+    }
   });
   
   const pnl = marketValue - costBasis;
   const pnlPercent = costBasis > 0 ? (pnl / costBasis) * 100 : 0;
-  const avgConviction = marketValue > 0 
-    ? Math.round(weightedScoreSum / marketValue) 
-    : (basketHoldings.length > 0 ? Math.round(scoreSum / basketHoldings.length) : 0);
+  const avgConviction = scoredMarketValue > 0
+    ? Math.round(weightedScoreSum / scoredMarketValue)
+    : (scoreCount > 0 ? Math.round(scoreSum / scoreCount) : null);
     
   return {
     holdingsCount: basketHoldings.length,
@@ -1307,6 +1736,7 @@ function getBasketMetrics(basketName) {
 
 function renderPortfolioPerformance() {
   if (!elements.basketGrid) return;
+  syncBasketsFromHoldings();
   if (!state.baskets.length) {
     state.baskets = [
       { id: "b-general", name: "General", description: "Default stock holdings", color: "slate" }
@@ -1326,24 +1756,31 @@ function renderPortfolioPerformance() {
   let totalValue = 0;
   let portfolioWeightedScoreSum = 0;
   let portfolioScoreSum = 0;
+  let portfolioScoreCount = 0;
+  let portfolioScoredValue = 0;
   
   // Aggregate from all holdings
   state.holdings.forEach((h) => {
-    const analysis = getAnalysisForTicker(h.ticker);
+    const analysis = getAnalysisForHolding(h);
     const cost = h.shares * h.entryPrice;
     const val = h.shares * (h.lastPrice ?? h.entryPrice);
+    const score = Number(analysis?.score);
     
     totalCost += cost;
     totalValue += val;
-    portfolioScoreSum += analysis.score;
-    portfolioWeightedScoreSum += (analysis.score * val);
+    if (Number.isFinite(score)) {
+      portfolioScoreSum += score;
+      portfolioScoreCount += 1;
+      portfolioWeightedScoreSum += (score * val);
+      portfolioScoredValue += val;
+    }
   });
   
   const totalPnl = totalValue - totalCost;
   const totalPnlPercent = totalCost > 0 ? (totalPnl / totalCost) * 100 : 0;
-  const avgPortfolioScore = totalValue > 0 
-    ? Math.round(portfolioWeightedScoreSum / totalValue) 
-    : (state.holdings.length > 0 ? Math.round(portfolioScoreSum / state.holdings.length) : 0);
+  const avgPortfolioScore = portfolioScoredValue > 0
+    ? Math.round(portfolioWeightedScoreSum / portfolioScoredValue)
+    : (portfolioScoreCount > 0 ? Math.round(portfolioScoreSum / portfolioScoreCount) : null);
   
   // 2. Render portfolio totals
   elements.totalPortfolioCost.textContent = `$${formatMoney(totalCost)}`;
@@ -1353,7 +1790,7 @@ function renderPortfolioPerformance() {
   pnlEl.className = totalPnl >= 0 ? (totalPnl > 0 ? "pnl-positive" : "pnl-neutral") : "pnl-negative";
   pnlEl.textContent = `${totalPnl >= 0 ? "+" : ""}$${formatMoney(totalPnl)} (${totalPnlPercent >= 0 ? "+" : ""}${totalPnlPercent.toFixed(2)}%)`;
   
-  elements.totalPortfolioScore.textContent = avgPortfolioScore;
+  elements.totalPortfolioScore.textContent = formatConvictionScore(avgPortfolioScore);
   
   // 3. Compute and sort baskets
   const basketDetails = state.baskets.map((basket) => {
@@ -1378,7 +1815,7 @@ function renderPortfolioPerformance() {
     } else if (sortMode === "name-asc") {
       return a.name.localeCompare(b.name);
     } else if (sortMode === "score-desc") {
-      return b.avgConviction - a.avgConviction;
+      return (b.avgConviction ?? -1) - (a.avgConviction ?? -1);
     }
     return 0;
   });
@@ -1440,7 +1877,7 @@ function renderPortfolioPerformance() {
                 <td>$${formatMoney(b.marketValue)}</td>
                 <td>$${formatMoney(b.costBasis)}</td>
                 <td><span class="${pnlClass}">${b.pnl >= 0 ? "+" : ""}$${formatMoney(b.pnl)} (${b.pnlPercent >= 0 ? "+" : ""}${b.pnlPercent.toFixed(1)}%)</span></td>
-                <td>${b.avgConviction}</td>
+                <td>${formatConvictionScore(b.avgConviction)}</td>
                 <td>${b.allocationPercent.toFixed(1)}%</td>
                 <td class="basket-table-actions">
                   <button class="basket-toggle-btn" data-basket-toggle="${b.name}" aria-expanded="${isExpanded}">
@@ -1494,14 +1931,15 @@ function renderPortfolioPerformance() {
 }
 
 function renderHoldingRow(h) {
-  const analysis = getAnalysisForTicker(h.ticker);
+  const analysis = getAnalysisForHolding(h);
   const currentPrice = h.lastPrice ?? h.entryPrice;
   const mktVal = h.shares * currentPrice;
   const cost = h.shares * h.entryPrice;
   const pnl = mktVal - cost;
   const pnlPct = cost > 0 ? (pnl / cost) * 100 : 0;
-  const targetPrice = h.targetPrice ?? analysis.targetPrice ?? null;
+  const targetPrice = h.targetPrice ?? analysis?.targetPrice ?? null;
   const targetText = targetPrice == null ? "—" : `$${formatMoney(targetPrice)}`;
+  const sectorText = analysis?.sector || getProfile(h).sector;
   
   const isEditing = state.editingHoldingTicker === h.ticker;
   const pnlClass = pnl >= 0 ? (pnl > 0 ? "pnl-positive" : "pnl-neutral") : "pnl-negative";
@@ -1516,7 +1954,10 @@ function renderHoldingRow(h) {
         <td>${targetText}</td>
         <td>$${formatMoney(mktVal)}</td>
         <td><span class="${pnlClass}">${pnl >= 0 ? "+" : ""}$${formatMoney(pnl)} (${pnlPct.toFixed(1)}%)</span></td>
-        <td><span class="decision-pill ${decisionClass(analysis.decision)}">${analysis.score} (${analysis.decision})</span></td>
+        <td>${analysis
+          ? `<span class="decision-pill ${decisionClass(analysis.decision)}">${formatConvictionScore(analysis.score)} (${analysis.decision})</span>`
+          : convictionCellMarkup(null)
+        }</td>
         <td class="table-actions">
           <button class="save-inline-btn" data-save-ticker="${h.ticker}" title="Save updates">💾</button>
           <button class="cancel-inline-btn" data-cancel-ticker="${h.ticker}" title="Cancel editing">❌</button>
@@ -1536,7 +1977,7 @@ function renderHoldingRow(h) {
             <label>
               Change Basket:
               <select id="edit-basket-${h.ticker}" class="table-input mini">
-                ${state.baskets.map((b) => `<option value="${b.name}" ${b.name === h.basket ? "selected" : ""}>${b.name}</option>`).join("")}
+                ${getAvailableBaskets().map((b) => `<option value="${b.name}" ${b.name === h.basket ? "selected" : ""}>${b.name}</option>`).join("")}
               </select>
             </label>
             <label>
@@ -1551,14 +1992,17 @@ function renderHoldingRow(h) {
   
   return `
     <tr>
-      <td class="ticker-cell">${h.ticker}<br><small>${analysis.sector}</small></td>
+      <td class="ticker-cell">${h.ticker}<br><small>${sectorText}</small></td>
       <td>${h.shares}</td>
       <td>$${formatMoney(h.entryPrice)}</td>
       <td>$${formatMoney(currentPrice)}</td>
       <td>${targetText}</td>
       <td><strong>$${formatMoney(mktVal)}</strong></td>
       <td><span class="pnl-badge ${pnlClass}">${pnl >= 0 ? "+" : ""}$${formatMoney(pnl)} (${pnlPct.toFixed(1)}%)</span></td>
-      <td><span class="decision-pill ${decisionClass(analysis.decision)}" title="Score breakdown: Macro ${analysis.macro}, Fund ${analysis.fundamentals}, Prop ${analysis.prospects}">${analysis.score}</span></td>
+      <td>${analysis
+        ? `<span class="decision-pill ${decisionClass(analysis.decision)}" title="Score breakdown: Macro ${analysis.macro ?? "—"}, Fund ${analysis.fundamentals ?? "—"}, Prop ${analysis.prospects ?? "—"}">${formatConvictionScore(analysis.score)}</span>`
+        : convictionCellMarkup(null)
+      }</td>
       <td class="table-actions">
         <button class="edit-inline-btn" data-edit-ticker="${h.ticker}" title="Edit Quantities / Targets">✏️</button>
         <button class="remove-inline-btn" data-remove-ticker="${h.ticker}" title="Remove holding">🗑️</button>
@@ -1781,9 +2225,69 @@ function handleDeleteBasket(basketName) {
   render();
 }
 
-/* ==========================================================================
-   EVENT LISTENERS WIRE UP
-   ========================================================================== */
+function autoCreateBaskets() {
+  if (!state.holdings.length) {
+    alert("No holdings available to auto-create baskets.");
+    return;
+  }
+
+  const colors = ["emerald", "sapphire", "amethyst", "amber", "ruby", "slate"];
+  const sectorMap = new Map();
+  state.holdings.forEach((holding) => {
+    const sector = inferredBasketNameForHolding(holding);
+    sectorMap.set(sector, (sectorMap.get(sector) || []).concat(holding));
+  });
+
+  const existingByName = new Map(state.baskets.map((basket) => [basket.name.toLowerCase(), basket]));
+  const newBaskets = [];
+
+  // Preserve General basket first
+  const generalBasket = existingByName.get("general") || {
+    id: "b-general",
+    name: "General",
+    description: "Default stock holdings",
+    color: "slate"
+  };
+  newBaskets.push(generalBasket);
+
+  let colorIndex = 0;
+  sectorMap.forEach((holdings, sector) => {
+    if (sector.toLowerCase() === "general") return;
+    const existing = existingByName.get(sector.toLowerCase());
+    if (existing) {
+      newBaskets.push(existing);
+      return;
+    }
+    newBaskets.push({
+      id: `b-${Date.now()}-${colorIndex}`,
+      name: sector,
+      description: `Auto-created basket for ${sector}`,
+      color: colors[colorIndex % colors.length]
+    });
+    colorIndex += 1;
+  });
+
+  const autoNames = new Set(Array.from(sectorMap.keys()).map((key) => key.toLowerCase()));
+
+  // Retain any other custom baskets that are not part of the auto groups and not General
+  state.baskets.forEach((basket) => {
+    const lower = basket.name.toLowerCase();
+    if (lower !== "general" && !autoNames.has(lower) && !newBaskets.some((b) => b.name.toLowerCase() === lower)) {
+      newBaskets.push(basket);
+    }
+  });
+
+  state.baskets = newBaskets;
+  state.holdings = state.holdings.map((holding) => {
+    return { ...holding, basket: inferredBasketNameForHolding(holding) };
+  });
+
+  updateBasketDatalist();
+  saveState();
+  saveHoldings();
+  render();
+  alert(`Auto-created ${sectorMap.size} basket${sectorMap.size === 1 ? "" : "s"}.`);
+}
 
 elements.analyzeBtn.addEventListener("click", runAnalysis);
 elements.loadSampleBtn.addEventListener("click", () => {
@@ -1792,6 +2296,46 @@ elements.loadSampleBtn.addEventListener("click", () => {
   runAnalysis();
 });
 elements.exportBtn.addEventListener("click", exportCsv);
+elements.importCsvReplaceBtn.addEventListener("click", () => {
+  importCsvMode = "replace";
+  elements.importCsvInput?.click();
+});
+elements.importCsvMergeBtn.addEventListener("click", () => {
+  importCsvMode = "merge";
+  elements.importCsvInput?.click();
+});
+elements.importCsvInput?.addEventListener("change", (event) => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  importHoldingsFromCsv(file, importCsvMode);
+  event.target.value = "";
+});
+elements.accountSelect?.addEventListener("change", (event) => {
+  changeAccount(event.target.value);
+});
+elements.createAccountBtn?.addEventListener("click", () => createAccount());
+elements.autoBasketBtn?.addEventListener("click", autoCreateBaskets);
+elements.deleteAccountBtn?.addEventListener("click", async () => {
+  if (!state.accountId) return;
+  const account = state.accounts.find((a) => a.id === state.accountId);
+  if (!account) return;
+  if (!confirm(`Delete account "${account.name}" and all its data? This cannot be undone.`)) return;
+
+  try {
+    const resp = await fetch(`/api/accounts/${encodeURIComponent(state.accountId)}`, { method: "DELETE" });
+    const json = await resp.json();
+    if (!resp.ok || json.error) {
+      alert(json.error || "Unable to delete account.");
+      return;
+    }
+    // Reload accounts and select first available
+    await loadAccounts();
+    setLoadStatus(`Account deleted: ${account.name}`, "success");
+  } catch (err) {
+    console.warn("Failed to delete account:", err);
+    alert("Failed to delete account.");
+  }
+});
 elements.clearBtn.addEventListener("click", () => {
   if (confirm("Are you sure you want to clear all data and reset the app?")) {
     localStorage.removeItem("stockAnalyzerState");
@@ -1811,29 +2355,29 @@ elements.clearBtn.addEventListener("click", () => {
     state.activeTab = "analyzer";
     
     // Clear database
-    fetch("/api/state", {
+    fetch(accountQuery("/api/state"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      body: JSON.stringify(accountBody({
         tickerInput: "",
         macro: { rates: 25, inflation: 20, growth: 25, risk: 13 },
         weights: { macro: 25, fundamentals: 45, prospects: 30 },
         activeTab: "analyzer",
         basketSort: "value-desc",
         baskets: state.baskets
-      })
+      }))
     }).catch(err => console.warn("Failed to clear state:", err));
     
-    fetch("/api/analysis", {
+    fetch(accountQuery("/api/analysis"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ results: [] })
+      body: JSON.stringify(accountBody({ results: [] }))
     }).catch(err => console.warn("Failed to clear analysis:", err));
     
-    fetch("/api/holdings", {
+    fetch(accountQuery("/api/holdings"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ holdings: [] })
+      body: JSON.stringify(accountBody({ holdings: [] }))
     }).catch(err => console.warn("Failed to clear holdings:", err));
     
     switchTab("analyzer");
@@ -1933,7 +2477,7 @@ elements.basketModal.querySelectorAll('input[name="basketColor"]').forEach((radi
 });
 
 // Load state and startup
-loadState();
+loadAccounts();
 
 // Refresh stock prices every 5 minutes in background
 setInterval(() => {
